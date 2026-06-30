@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { saveAccount, getActiveAccount } from "./tokens";
 
 const API = "https://api.mercadolibre.com";
@@ -9,22 +10,52 @@ function env(name) {
 }
 
 // ------------------------------------------------------------
+// PKCE (Proof Key for Code Exchange)
+// ------------------------------------------------------------
+
+// base64url sem padding, formato exigido pelo PKCE.
+function base64url(buf) {
+  return buf
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+// Segredo aleatório gerado no início do fluxo (43 chars). Fica no cookie.
+export function generateCodeVerifier() {
+  return base64url(crypto.randomBytes(32));
+}
+
+// Desafio derivado do verifier: BASE64URL(SHA256(verifier)). Vai na URL de auth.
+export function challengeFromVerifier(verifier) {
+  const hash = crypto.createHash("sha256").update(verifier).digest();
+  return base64url(hash);
+}
+
+// ------------------------------------------------------------
 // OAuth
 // ------------------------------------------------------------
 
 // URL pra onde mandamos o usuário autorizar o app.
-export function buildAuthUrl(state) {
+// Com PKCE, mandamos também code_challenge + code_challenge_method=S256.
+export function buildAuthUrl({ state, codeChallenge } = {}) {
   const params = new URLSearchParams({
     response_type: "code",
     client_id: env("MELI_CLIENT_ID"),
     redirect_uri: env("MELI_REDIRECT_URI"),
   });
   if (state) params.set("state", state);
+  if (codeChallenge) {
+    params.set("code_challenge", codeChallenge);
+    params.set("code_challenge_method", "S256");
+  }
   return `${env("MELI_AUTH_DOMAIN")}/authorization?${params.toString()}`;
 }
 
 // Troca o "code" recebido no callback por access/refresh token.
-export async function exchangeCodeForToken(code) {
+// Com PKCE, enviamos o code_verifier original pra o ML validar o challenge.
+export async function exchangeCodeForToken(code, codeVerifier) {
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     client_id: env("MELI_CLIENT_ID"),
@@ -32,6 +63,7 @@ export async function exchangeCodeForToken(code) {
     code,
     redirect_uri: env("MELI_REDIRECT_URI"),
   });
+  if (codeVerifier) body.set("code_verifier", codeVerifier);
 
   const res = await fetch(`${API}/oauth/token`, {
     method: "POST",
